@@ -1,17 +1,20 @@
 import json
+from pathlib import Path
 
 import pandas as pd
 import requests
 from sqlalchemy import create_engine
 
 from data_model_schemas import TableSchemas
+from logger_setup import logger
+
 
 class ETLPipeline:
     """
     ETL pipeline for processing movie data.
 
     Loads revenue data from CSV, fetches movie details from OMDB API,
-    processes and transforms the data, and saves it into an SQLite database.
+    processes, transforms the data and saves it into an SQLite database.
     """
     def __init__(
         self,
@@ -28,22 +31,39 @@ class ETLPipeline:
         """
 
         # File and API Configuration
-        self.revenues_csv = f"../{revenues_file_path}"
+        self.revenues_csv = str(Path(__file__).parent.parent / revenues_file_path)
         self.omdbapi = f"http://www.omdbapi.com/?apikey={omdb_api_key}"
 
         # Database Configuration
         self.db_schemas = TableSchemas
-        engine = create_engine(f"sqlite:///../{db_path}")
+
+        db_full_path = Path(__file__).parent.parent / db_path
+        engine = create_engine(f"sqlite:///{db_full_path}")
         self.conn = engine.connect()
 
     def fetch_revenues_data(self) -> pd.DataFrame:
         """
-        Load revenue data from CSV file.
+        Load revenues data.
 
         Returns:
             pd.DataFrame: DataFrame containing revenues data.
         """
         return pd.read_csv(self.revenues_csv)
+
+    def assign_movie_ids(self, df: pd.DataFrame) -> dict:
+        """
+        Assign unique IDs to movie titles.
+
+        Args:
+            df (pd.DataFrame): Revenue dataset.
+
+        Returns:
+            dict: Mapping from title to movie_id.
+        """
+        unique_titles = df["title"].drop_duplicates().reset_index(drop=True)
+        movie_id_dict = {title: idx + 1 for idx, title in enumerate(unique_titles)}
+
+        return movie_id_dict
 
     def get_movie_data(self, title: str) -> dict | None:
         """
@@ -53,15 +73,15 @@ class ETLPipeline:
             title (str): Movie title.
 
         Returns:
-            dict or None: Movie data dictionary if successful, None otherwise.
+            dict or None: Movie details.
         """
         url_title = f"{self.omdbapi}&t={title}"
         response = requests.get(url_title)
-        
+
         if response.status_code == 200:
             data = response.json()
-            if data.get("Response") == "True":
-                return data
+            return data
+
         return None
 
     def fetch_ombdapi_data(self, movies: dict) -> list:
@@ -69,7 +89,7 @@ class ETLPipeline:
         Fetch movie data from OMDB API for movies.
 
         Args:
-            movies (dict): Mapping of movie titles to their unique movie identifiers.
+            movies (dict): Movie titles and their assigned IDs {"title": "id"}
 
         Returns:
             list: List of dictionaries representing movie details.
@@ -85,34 +105,35 @@ class ETLPipeline:
         Prepare the distributor dataset including distributor_id.
 
         Args:
-            df (pd.DataFrame): DataFrame with revenue data.
+            df (pd.DataFrame): DataFrame with revenues data.
 
         Returns:
             pd.DataFrame: Distributor dataset.
         """
         distributor_df = df[["distributor"]].drop_duplicates().reset_index(drop=True)
         distributor_df["distributor_id"] = distributor_df.index + 1
+
         return distributor_df.rename(columns={"distributor": "distributor_name"})
 
-
-    def process_revenue_data(self, df: pd.DataFrame, distributor_df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    def process_revenue_data(self, df: pd.DataFrame, distributor_df: pd.DataFrame, movie_id_dict: dict) -> pd.DataFrame:
         """
         Process revenue data.
 
         Args:
             df (pd.DataFrame): Revenue dataset.
             distributor_df (pd.DataFrame): Distributor dataset.
+            movie_id_dict (dict): Movie titles and their assigned IDs {"title": "id"}.
 
         Returns:
-            tuple: Processed revenue dataset and dictionary mapping movie titles to movie IDs.
+            tuple: Processed revenue dataset.
         """
         df = df.merge(distributor_df, left_on="distributor", right_on="distributor_name")
-        df["movie_id"] = df["title"].apply(lambda t: hash(t) & 0xffffffff)
-        df['date'] = pd.to_datetime(df['date']).dt.date
+        df["date"] = pd.to_datetime(df["date"]).dt.date
+
+        df["movie_id"] = df["title"].map(movie_id_dict)
         
-        movie_id_dict = dict(zip(df["title"], df["movie_id"]))
         revenue_df = df[["id", "movie_id", "revenue", "theaters", "distributor_id", "date"]]
-        return revenue_df, movie_id_dict
+        return revenue_df
 
     def process_movies_data(self, movies_data: list) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
@@ -132,7 +153,7 @@ class ETLPipeline:
             genres = data.get("Genre", "").split(", ")
 
             for genre in genres:
-                if genre and genre not in dim_genres:
+                if genre not in dim_genres:
                     dim_genres[genre] = len(dim_genres) + 1
                 bridge_movie_genre.append({"movie_id": movie_id, "genre_id": dim_genres[genre]})
 
@@ -140,8 +161,8 @@ class ETLPipeline:
                 "movie_id": movie_id,
                 "title": data.get("Title"),
                 "year": data.get("Year"),
-                "released": pd.to_datetime(data.get("Released"), format="%d %b %Y").date() if data.get("Released") != "N/A" else None,
-                "runtime_minutes": data.get("Runtime", None).replace(" min", "") if data.get("Runtime") != "N/A" else None,
+                "released": pd.to_datetime(data.get("Released"), format="%d %b %Y").date() if data.get("Released") not in [None, "N/A"] else None,
+                "runtime_minutes": data.get("Runtime").replace(" min", "") if data.get("Runtime") and data.get("Runtime") != "N/A" else None,
                 "director": data.get("Director"),
                 "writer": data.get("Writer"),
                 "actors": data.get("Actors"),
@@ -152,7 +173,7 @@ class ETLPipeline:
                 "ratings": json.dumps(data.get("Ratings", [])),
                 "metascore": data.get("Metascore"),
                 "imdb_rating": data.get("imdbRating") if data.get("imdbRating") != "N/A" else None,
-                "imdb_votes": data.get("imdbVotes").replace(",", ""),
+                "imdb_votes": data.get("imdbVotes", "").replace(",", ""),
                 "box_office_total": data.get("BoxOffice", "").replace("$", "").replace(",", "") if data.get("BoxOffice") != "N/A" else None,
                 "production": data.get("Production"),
                 "website": data.get("Website"),
@@ -160,7 +181,7 @@ class ETLPipeline:
             })
 
         
-        dim_movies_df = pd.DataFrame(dim_movies).replace(['N/A', ''], None)
+        dim_movies_df = pd.DataFrame(dim_movies).replace(["N/A", ""], None)
         dim_genres_df = pd.DataFrame([{"genre_id": v, "genre_name": k} for k, v in dim_genres.items()])
         bridge_movie_genre_df = pd.DataFrame(bridge_movie_genre)
         
@@ -174,27 +195,29 @@ class ETLPipeline:
             df (pd.DataFrame): DataFrame to save.
             table_name (str): Target table name in the database.
         """
+        logger.info(f"Saving table {table_name} to SQLite database")
         table_schema = self.db_schemas.get_schema(table_name)
         df.to_sql(table_name, self.conn, if_exists="replace", index=False, dtype=table_schema)
 
     def run(self):
-        """
-        Execute the ETL pipeline:
-        - Load revenue data
-        - Process distributors and revenues
-        - Fetch movie data from OMDB API
-        - Process movie-related dimension tables
-        - Save all tables to the SQLite database
-        """
+        """Execute the ETL pipeline."""
+        logger.info("Starting ETL pipeline run")
+        # Read revenues data
         # Added limit due to the number of available API requests
-        revenue_df = self.fetch_revenues_data().head(900)
-        
+        revenue_df = self.fetch_revenues_data().sort_values(by="title").head(37818)
+
+        # Assign a unique id to each movie title
+        movie_id_dict = self.assign_movie_ids(revenue_df)
+
+        # Prepare dim_distributor and fact_revenues datasets
         distributor_df = self.process_distributors_data(revenue_df)
-        fact_revenues_df, movie_id_dict = self.process_revenue_data(revenue_df, distributor_df)
-               
+        fact_revenues_df = self.process_revenue_data(revenue_df, distributor_df, movie_id_dict)
+
+        # Prepare dim_movies, dim_genres and bridge_movie_genre datasets
         movies_data = self.fetch_ombdapi_data(movie_id_dict)
         dim_movies_df, dim_genres_df, bridge_movie_genre_df = self.process_movies_data(movies_data)
 
+        # Save the data
         for table_name, df in [
             ("dim_movies", dim_movies_df),
             ("dim_genres", dim_genres_df),
@@ -203,3 +226,5 @@ class ETLPipeline:
             ("fact_revenues", fact_revenues_df),
         ]:
             self.save_to_sqlite(df=df, table_name=table_name)
+
+        logger.info("ETL pipeline run completed successfully")
