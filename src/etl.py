@@ -13,12 +13,11 @@ class ETLPipeline:
     Loads revenue data from CSV, fetches movie details from OMDB API,
     processes and transforms the data, and saves it into an SQLite database.
     """
-
     def __init__(
         self,
         omdb_api_key: str,
-        revenues_file_path: str = "data/revenues_per_day.csv",
-        db_path: str = "output_data_db/movies.db"):
+        revenues_file_path: str = "input_data/revenues_per_day.csv",
+        db_path: str = "output_data/movies.db"):
         """
         Initialize the ETL pipeline.
 
@@ -187,7 +186,8 @@ class ETLPipeline:
         - Process movie-related dimension tables
         - Save all tables to the SQLite database
         """
-        revenue_df = self.fetch_revenues_data().head(300)
+        # Added limit due to the number of available API requests
+        revenue_df = self.fetch_revenues_data().head(900)
         
         distributor_df = self.process_distributors_data(revenue_df)
         fact_revenues_df, movie_id_dict = self.process_revenue_data(revenue_df, distributor_df)
