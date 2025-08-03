@@ -29,19 +29,19 @@ Additionally, the project provides an ER diagram to clearly illustrate the struc
 
 ## Setup
 
-1. Clone the repository  
+1. Clone the repository:  
    ```bash
    git clone https://github.com/RzeznAnita/movie_box_office_project.git
    cd movie_box_office_project
    ```
 
-2. Create and activate a virtual environment
+2. Create and activate a virtual environment:
    ```bash
    python -m venv venv
    source venv/Scripts/activate
    ```
 
-3. Install the dependencies
+3. Install the dependencies:
    ```bash
    pip install -r requirements.txt
    ```
